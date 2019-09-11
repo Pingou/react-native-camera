@@ -26,15 +26,18 @@ import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CameraMetadata;
+import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.CamcorderProfile;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaRecorder;
-import android.support.annotation.NonNull;
+import androidx.annotation.NonNull;
 import android.util.Log;
 import android.util.SparseIntArray;
 import android.view.Surface;
@@ -73,6 +76,10 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
      * Max preview height that is guaranteed by Camera2 API
      */
     private static final int MAX_PREVIEW_HEIGHT = 1080;
+
+    private static final int FOCUS_AREA_SIZE_DEFAULT = 300;
+
+    private static final int FOCUS_METERING_AREA_WEIGHT_DEFAULT = 1000;
 
     private final CameraManager mCameraManager;
 
@@ -230,6 +237,10 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
     private boolean mAutoFocus;
 
     private int mFlash;
+
+    private float mExposure;
+
+    private int mCameraOrientation;
 
     private int mDisplayOrientation;
 
@@ -466,6 +477,17 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
     }
 
     @Override
+    float getExposureCompensation() {
+        return mExposure;
+    }
+
+    @Override
+    void setExposureCompensation(float exposure) {
+        Log.e("CAMERA_2:: ", "Adjusting exposure is not currently supported for Camera2");
+    }
+
+
+    @Override
     void takePicture(ReadableMap options) {
         mCaptureCallback.setOptions(options);
 
@@ -615,6 +637,11 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
     }
 
     @Override
+    int getCameraOrientation() {
+        return mCameraOrientation;
+    }
+
+    @Override
     void setDisplayOrientation(int displayOrientation) {
         mDisplayOrientation = displayOrientation;
         mPreview.setDisplayOrientation(mDisplayOrientation);
@@ -687,8 +714,8 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
 
     /**
      * <p>Collects some information from {@link #mCameraCharacteristics}.</p>
-     * <p>This rewrites {@link #mPreviewSizes}, {@link #mPictureSizes}, and optionally,
-     * {@link #mAspectRatio}.</p>
+     * <p>This rewrites {@link #mPreviewSizes}, {@link #mPictureSizes},
+     * {@link #mCameraOrientation}, and optionally, {@link #mAspectRatio}.</p>
      */
     private void collectCameraInfo() {
         StreamConfigurationMap map = mCameraCharacteristics.get(
@@ -718,6 +745,8 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
         if (!mPreviewSizes.ratios().contains(mAspectRatio)) {
             mAspectRatio = mPreviewSizes.ratios().iterator().next();
         }
+
+        mCameraOrientation = mCameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
     }
 
     protected void collectPictureSizes(SizeMap sizes, StreamConfigurationMap map) {
@@ -1014,6 +1043,89 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
         }
     }
 
+
+    /**
+     * Auto focus on input coordinates
+     */
+
+    // Much credit - https://gist.github.com/royshil/8c760c2485257c85a11cafd958548482
+    void setFocusArea(float x, float y) {
+        if (mCaptureSession == null) {
+            return;
+        }
+        CameraCaptureSession.CaptureCallback captureCallbackHandler = new CameraCaptureSession.CaptureCallback() {
+            @Override
+            public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+                super.onCaptureCompleted(session, request, result);
+
+                if (request.getTag() == "FOCUS_TAG") {
+                    mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null);
+                    try {
+                        mCaptureSession.setRepeatingRequest(mPreviewRequestBuilder.build(), null, null);
+                    } catch (CameraAccessException e) {
+                        Log.e(TAG, "Failed to manual focus.", e);
+                    }
+                }
+            }
+
+            @Override
+            public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
+                super.onCaptureFailed(session, request, failure);
+                Log.e(TAG, "Manual AF failure: " + failure);
+            }
+        };
+
+        try {
+            mCaptureSession.stopRepeating();
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Failed to manual focus.", e);
+        }
+
+        mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL);
+        mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+        try {
+            mCaptureSession.capture(mPreviewRequestBuilder.build(), captureCallbackHandler, null);
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Failed to manual focus.", e);
+        }
+
+        if (isMeteringAreaAFSupported()) {
+            MeteringRectangle focusAreaTouch = calculateFocusArea(x, y);
+            mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[]{focusAreaTouch});
+        }
+        mPreviewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+        mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+        mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START);
+        mPreviewRequestBuilder.setTag("FOCUS_TAG");
+
+        try {
+            mCaptureSession.capture(mPreviewRequestBuilder.build(), captureCallbackHandler, null);
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Failed to manual focus.", e);
+        }
+    }
+
+    private boolean isMeteringAreaAFSupported() {
+        return mCameraCharacteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) >= 1;
+    }
+
+    private MeteringRectangle calculateFocusArea(float x, float y) {
+        final Rect sensorArraySize = mCameraCharacteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+
+        // Current iOS spec has a requirement on sensor orientation that doesn't change, spec followed here.
+        final int xCoordinate = (int)(y  * (float)sensorArraySize.height());
+        final int yCoordinate = (int)(x * (float)sensorArraySize.width());
+        final int halfTouchWidth  = 150;  //TODO: this doesn't represent actual touch size in pixel. Values range in [3, 10]...
+        final int halfTouchHeight = 150;
+        MeteringRectangle focusAreaTouch = new MeteringRectangle(Math.max(yCoordinate - halfTouchWidth,  0),
+                                                                Math.max(xCoordinate - halfTouchHeight, 0),
+                                                                halfTouchWidth  * 2,
+                                                                halfTouchHeight * 2,
+                                                                MeteringRectangle.METERING_WEIGHT_MAX - 1);
+
+        return focusAreaTouch;
+    }
+
     /**
      * Captures a still picture.
      */
@@ -1094,11 +1206,12 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
         mMediaRecorder.setOutputFile(path);
         mVideoPath = path;
 
-        if (CamcorderProfile.hasProfile(Integer.parseInt(mCameraId), profile.quality)) {
-            setCamcorderProfile(profile, recordAudio);
-        } else {
-            setCamcorderProfile(CamcorderProfile.get(CamcorderProfile.QUALITY_HIGH), recordAudio);
+        CamcorderProfile camProfile = profile;
+        if (!CamcorderProfile.hasProfile(Integer.parseInt(mCameraId), profile.quality)) {
+            camProfile = CamcorderProfile.get(CamcorderProfile.QUALITY_HIGH);
         }
+        camProfile.videoBitRate = profile.videoBitRate;
+        setCamcorderProfile(camProfile, recordAudio);
 
         mMediaRecorder.setOrientationHint(getOutputRotation());
 

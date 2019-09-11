@@ -3,7 +3,7 @@
  */
 
 package com.lwansbrough.RCTCamera;
-import android.util.Log;
+
 import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -13,6 +13,7 @@ import android.hardware.Camera;
 import android.view.MotionEvent;
 import android.view.TextureView;
 import android.os.AsyncTask;
+import android.util.Log;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactContext;
@@ -133,7 +134,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
 
     public void setZoom(int zoom) {
         RCTCamera.getInstance().setZoom(_cameraType, zoom);
-   }
+    }
 
     public void startPreview() {
         if (_surfaceTexture != null) {
@@ -188,11 +189,11 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
                 );
                 parameters.setPictureSize(optimalPictureSize.width, optimalPictureSize.height);
 
-                try {
-                    _camera.setParameters(parameters);
+                try{
+                  _camera.setParameters(parameters);
                 }
                 catch(RuntimeException e ) {
-                  Log.e("RCTCamera", "setParameters failed", e);
+                  Log.e("RCTCameraViewFinder", "setParameters failed", e);
                 }
                 _camera.setPreviewTexture(_surfaceTexture);
                 _camera.startPreview();
@@ -337,11 +338,16 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             this.imageData = imageData;
         }
 
-        private Result getBarcode(int width, int height) {
+        private Result getBarcode(int width, int height, boolean inverse) {
             try{
-              PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(imageData, width, height, 0, 0, width, height, false);
-              BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-              return _multiFormatReader.decodeWithState(bitmap);
+                PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(imageData, width, height, 0, 0, width, height, false);
+                BinaryBitmap bitmap;
+                if (inverse) {
+                    bitmap = new BinaryBitmap(new HybridBinarizer(source.invert()));
+                } else {
+                    bitmap = new BinaryBitmap(new HybridBinarizer(source));
+                }
+                return _multiFormatReader.decodeWithState(bitmap);
             } catch (Throwable t) {
                 // meh
             } finally {
@@ -355,15 +361,25 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
 
             int width = size.width;
             int height = size.height;
-            Result result = getBarcode(width, height);
-            if (result != null)
-              return result;
-
+            Result result = getBarcode(width, height, false);
+            if (result != null) {
+                return result;
+            }
+            // inverse
+            result = getBarcode(width, height, true);
+            if (result != null) {
+                return result;
+            }
+            // rotate
             rotateImage(width, height);
             width = size.height;
             height = size.width;
+            result = getBarcode(width, height, false);
+            if (result != null) {
+                return result;
+            }
+            return getBarcode(width, height, true);
 
-            return getBarcode(width, height);
         }
 
         private void rotateImage(int width, int height) {
@@ -406,7 +422,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
                         resultPoints.pushMap(newPoint);
                     }
                 }
-                
+
                 event.putArray("bounds", resultPoints);
                 event.putString("data", result.getText());
                 event.putString("type", result.getBarcodeFormat().toString());
@@ -466,11 +482,11 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
         }
         mFingerSpacing = newDist;
         params.setZoom(zoom);
-        try {
-            _camera.setParameters(params);
+        try{
+          _camera.setParameters(params);
         }
         catch(RuntimeException e ) {
-          Log.e("RCTCamera", "setParameters failed", e);
+          Log.e("RCTCameraViewFinder", "setParameters failed", e);
         }
     }
 
@@ -517,7 +533,12 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             }
 
             // Set parameters before starting auto-focus.
-            _camera.setParameters(params);
+            try{
+              _camera.setParameters(params);
+            }
+            catch(RuntimeException e ) {
+              Log.e("RCTCameraViewFinder", "setParameters failed", e);
+            }
 
             // Start auto-focus now that focus area has been set. If successful, then can cancel
             // it afterwards. Wrap in try-catch to avoid crashing on merely autoFocus fails.

@@ -17,18 +17,22 @@
 package com.google.android.cameraview;
 
 import android.annotation.SuppressLint;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.media.CamcorderProfile;
 import android.media.MediaRecorder;
 import android.os.Build;
-import android.support.v4.util.SparseArrayCompat;
+import android.os.Handler;
+import androidx.collection.SparseArrayCompat;
+import android.util.Log;
 import android.view.SurfaceHolder;
 
 import com.facebook.react.bridge.ReadableMap;
-import android.util.Log;
+
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.SortedSet;
@@ -62,6 +66,12 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
       WB_MODES.put(Constants.WB_INCANDESCENT, Camera.Parameters.WHITE_BALANCE_INCANDESCENT);
     }
 
+    private static final int FOCUS_AREA_SIZE_DEFAULT = 300;
+    private static final int FOCUS_METERING_AREA_WEIGHT_DEFAULT = 1000;
+    private static final int DELAY_MILLIS_BEFORE_RESETTING_FOCUS = 3000;
+
+    private Handler mHandler = new Handler();
+
     private int mCameraId;
 
     private final AtomicBoolean isPictureCaptureInProgress = new AtomicBoolean(false);
@@ -76,14 +86,14 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
     private String mVideoPath;
 
-    private boolean mIsRecording;
+    private final AtomicBoolean mIsRecording = new AtomicBoolean(false);
 
     private final SizeMap mPreviewSizes = new SizeMap();
-                                                    
+
     private boolean mIsPreviewActive = false;
 
     private final SizeMap mPictureSizes = new SizeMap();
-                                                    
+
     private Size mPictureSize;
 
     private AspectRatio mAspectRatio;
@@ -95,6 +105,8 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
     private int mFacing;
 
     private int mFlash;
+
+    private float mExposure;
 
     private int mDisplayOrientation;
 
@@ -108,6 +120,8 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
     private boolean mIsScanning;
 
+    private boolean mustUpdateSurface;
+
     private SurfaceTexture mPreviewTexture;
 
     Camera1(Callback callback, PreviewImpl preview) {
@@ -115,11 +129,7 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         preview.setCallback(new PreviewImpl.Callback() {
             @Override
             public void onSurfaceChanged() {
-                if (mCamera != null) {
-                    setUpPreview();
-                    mIsPreviewActive = false;
-                    adjustCameraParameters();
-                }
+                updateSurface();
             }
 
             @Override
@@ -127,6 +137,25 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
               stop();
             }
         });
+    }
+
+    private void updateSurface(){
+        if (mCamera != null) {
+
+            // do not update surface if we are currently capturing
+            // since it will break capture events/video due to the
+            // pause preview calls
+            // capture callbacks will handle it if needed afterwards.
+            if(!isPictureCaptureInProgress.get() && !mIsRecording.get()){
+                mustUpdateSurface = false;
+                setUpPreview();
+                mIsPreviewActive = false;
+                adjustCameraParameters();
+            }
+            else{
+                mustUpdateSurface = true;
+            }
+        }
     }
 
     @Override
@@ -147,23 +176,44 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
     @Override
     void stop() {
-        if (mCamera != null) {
-            mCamera.stopPreview();
-            mCamera.setPreviewCallback(null);
-        }
-        mShowingPreview = false;
-        if (mMediaRecorder != null) {
-            mMediaRecorder.stop();
-            mMediaRecorder.release();
-            mMediaRecorder = null;
 
-            if (mIsRecording) {
-                int deviceOrientation = displayOrientationToOrientationEnum(mDeviceOrientation);
-                mCallback.onVideoRecorded(mVideoPath, mOrientation != Constants.ORIENTATION_AUTO ? mOrientation : deviceOrientation, deviceOrientation);
-                mIsRecording = false;
+        // make sure no other threads are trying to do this at the same time
+        // such as another call to stop() from surface destroyed
+        // or host destroyed. Should avoid crashes with concurrent calls
+
+        synchronized (this) {
+            if (mMediaRecorder != null) {
+                try{
+                    mMediaRecorder.stop();
+                }
+                catch(RuntimeException e){
+                    Log.e("CAMERA_1::", "mMediaRecorder.stop() failed", e);
+                }
+
+                try{
+                    mMediaRecorder.reset();
+                    mMediaRecorder.release();
+                }
+                catch(RuntimeException e){
+                    Log.e("CAMERA_1::", "mMediaRecorder.release() failed", e);
+                }
+
+                mMediaRecorder = null;
+
+                if (mIsRecording.get()) {
+                    int deviceOrientation = displayOrientationToOrientationEnum(mDeviceOrientation);
+                    mCallback.onVideoRecorded(mVideoPath, mOrientation != Constants.ORIENTATION_AUTO ? mOrientation : deviceOrientation, deviceOrientation);
+                }
             }
+
+            if (mCamera != null) {
+                mCamera.stopPreview();
+                mCamera.setPreviewCallback(null);
+            }
+            mShowingPreview = false;
+
+            releaseCamera();
         }
-        releaseCamera();
     }
 
     // Suppresses Camera#setPreviewTexture
@@ -197,7 +247,7 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             mCamera.setPreviewCallback(this);
         }
     }
-                                                    
+
     @Override
     public void resumePreview() {
         startCameraPreview();
@@ -241,12 +291,12 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         }
         return idealAspectRatios.ratios();
     }
-                                                    
+
     @Override
     SortedSet<Size> getAvailablePictureSizes(AspectRatio ratio) {
         return mPictureSizes.sizes(ratio);
     }
-    
+
     @Override
     void setPictureSize(Size size) {
         if (size == null) {
@@ -263,15 +313,15 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         }
         if (mCameraParameters != null && mCamera != null) {
             mCameraParameters.setPictureSize(mPictureSize.getWidth(), mPictureSize.getHeight());
-            try {
+            try{
               mCamera.setParameters(mCameraParameters);
             }
             catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
+              Log.e("CAMERA_1::", "setParameters failed", e);
             }
         }
     }
-    
+
     @Override
     Size getPictureSize() {
         return mPictureSize;
@@ -307,12 +357,12 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             return;
         }
         if (setAutoFocusInternal(autoFocus)) {
-            try {
+          try{
             mCamera.setParameters(mCameraParameters);
-            }
-            catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
-            }
+          }
+          catch(RuntimeException e ) {
+            Log.e("CAMERA_1::", "setParameters failed", e);
+          }
         }
     }
 
@@ -331,18 +381,39 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             return;
         }
         if (setFlashInternal(flash)) {
-            try {
+          try{
             mCamera.setParameters(mCameraParameters);
-            }
-            catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
-            }
+          }
+          catch(RuntimeException e ) {
+            Log.e("CAMERA_1::", "setParameters failed", e);
+          }
         }
     }
 
     @Override
     int getFlash() {
         return mFlash;
+    }
+
+    @Override
+    float getExposureCompensation() {
+        return mExposure;
+    }
+
+    @Override
+    void setExposureCompensation(float exposure) {
+
+        if (exposure == mExposure) {
+            return;
+        }
+        if (setExposureInternal(exposure)) {
+          try{
+            mCamera.setParameters(mCameraParameters);
+          }
+          catch(RuntimeException e ) {
+            Log.e("CAMERA_1::", "setParameters failed", e);
+          }
+        }
     }
 
     @Override
@@ -361,12 +432,12 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             return;
         }
         if (setZoomInternal(zoom)) {
-            try {
+          try{
             mCamera.setParameters(mCameraParameters);
-            }
-            catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
-            }
+          }
+          catch(RuntimeException e ) {
+            Log.e("CAMERA_1::", "setParameters failed", e);
+          }
         }
     }
 
@@ -381,12 +452,12 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             return;
         }
         if (setWhiteBalanceInternal(whiteBalance)) {
-            try {
+          try{
             mCamera.setParameters(mCameraParameters);
-            }
-            catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
-            }
+          }
+          catch(RuntimeException e ) {
+            Log.e("CAMERA_1::", "setParameters failed", e);
+          }
         }
     }
 
@@ -417,17 +488,13 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         if (!mIsPreviewActive) {
             throw new IllegalStateException("Preview is paused - resume it before taking a picture.");
         }
-        if (getAutoFocus()) {
-            mCamera.cancelAutoFocus();
-            mCamera.autoFocus(new Camera.AutoFocusCallback() {
-                @Override
-                public void onAutoFocus(boolean success, Camera camera) {
-                    takePictureInternal(options);
-                }
-            });
-        } else {
-            takePictureInternal(options);
-        }
+
+        // UPDATE: Take picture right away instead of requesting/waiting for focus.
+        // This will match closer what the native camera does,
+        // and will capture whatever is on the preview without changing the camera focus.
+        // This change will also help with autoFocusPointOfInterest not being usable to capture (Issue #2420)
+        // and with takePicture never returning/resolving if the focus was reset (Issue #2421)
+        takePictureInternal(options);
     }
 
     int orientationEnumToRotation(int orientation) {
@@ -461,58 +528,77 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
     }
 
     void takePictureInternal(final ReadableMap options) {
-        if (!isPictureCaptureInProgress.getAndSet(true)) {
+        // if not capturing already, atomically set it to true
+        if (!mIsRecording.get() && isPictureCaptureInProgress.compareAndSet(false, true)) {
 
-            if (options.hasKey("orientation") && options.getInt("orientation") != Constants.ORIENTATION_AUTO) {
-                mOrientation = options.getInt("orientation");
-                int rotation = orientationEnumToRotation(mOrientation);
-                mCameraParameters.setRotation(calcCameraRotation(rotation));
-                try {
-                mCamera.setParameters(mCameraParameters);
-                }
-                catch(RuntimeException e ) {
-                  Log.e("RCTCamera", "setParameters failed", e);
-                }
-            }
-
-            mCamera.takePicture(null, null, null, new Camera.PictureCallback() {
-                @Override
-                public void onPictureTaken(byte[] data, Camera camera) {
-                    isPictureCaptureInProgress.set(false);
-                    camera.cancelAutoFocus();
-                    if (options.hasKey("pauseAfterCapture") && !options.getBoolean("pauseAfterCapture")) {
-                        camera.startPreview();
-                        mIsPreviewActive = true;
-                        if (mIsScanning) {
-                            camera.setPreviewCallback(Camera1.this);
-                        }
-                    } else {
-                        camera.stopPreview();
-                        mIsPreviewActive = false;
-                        camera.setPreviewCallback(null);
+            try{
+                if (options.hasKey("orientation") && options.getInt("orientation") != Constants.ORIENTATION_AUTO) {
+                    mOrientation = options.getInt("orientation");
+                    int rotation = orientationEnumToRotation(mOrientation);
+                    mCameraParameters.setRotation(calcCameraRotation(rotation));
+                    try{
+                        mCamera.setParameters(mCameraParameters);
                     }
-
-                    mOrientation = Constants.ORIENTATION_AUTO;
-                    mCallback.onPictureTaken(data, displayOrientationToOrientationEnum(mDeviceOrientation));
+                    catch(RuntimeException e ) {
+                        Log.e("CAMERA_1::", "setParameters failed", e);
+                    }
                 }
-            });
+
+                mCamera.takePicture(null, null, null, new Camera.PictureCallback() {
+                    @Override
+                    public void onPictureTaken(byte[] data, Camera camera) {
+                        isPictureCaptureInProgress.set(false);
+
+                        // this shouldn't be needed and messes up autoFocusPointOfInterest
+                        // camera.cancelAutoFocus();
+
+                        if (options.hasKey("pauseAfterCapture") && !options.getBoolean("pauseAfterCapture")) {
+                            camera.startPreview();
+                            mIsPreviewActive = true;
+                            if (mIsScanning) {
+                                camera.setPreviewCallback(Camera1.this);
+                            }
+                        } else {
+                            camera.stopPreview();
+                            mIsPreviewActive = false;
+                            camera.setPreviewCallback(null);
+                        }
+
+                        mOrientation = Constants.ORIENTATION_AUTO;
+                        mCallback.onPictureTaken(data, displayOrientationToOrientationEnum(mDeviceOrientation));
+
+                        if(mustUpdateSurface){
+                            updateSurface();
+                        }
+                    }
+                });
+            }
+            catch(Exception e){
+                isPictureCaptureInProgress.set(false);
+                throw e;
+            }
+        }
+        else{
+            throw new IllegalStateException("Camera capture failed. Camera is already capturing.");
         }
     }
 
     @Override
     boolean record(String path, int maxDuration, int maxFileSize, boolean recordAudio, CamcorderProfile profile, int orientation) {
-        if (!mIsRecording) {
+
+        // make sure compareAndSet is last because we are setting it
+        if (!isPictureCaptureInProgress.get() && mIsRecording.compareAndSet(false, true)) {
             if (orientation != Constants.ORIENTATION_AUTO) {
                 mOrientation = orientation;
             }
-            setUpMediaRecorder(path, maxDuration, maxFileSize, recordAudio, profile);
             try {
+                setUpMediaRecorder(path, maxDuration, maxFileSize, recordAudio, profile);
                 mMediaRecorder.prepare();
                 mMediaRecorder.start();
-                mIsRecording = true;
                 return true;
-            } catch (IOException e) {
-                e.printStackTrace();
+            } catch (Exception e) {
+                mIsRecording.set(false);
+                Log.e("CAMERA_1::", "Record start failed", e);
                 return false;
             }
         }
@@ -521,12 +607,20 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
     @Override
     void stopRecording() {
-        if (mIsRecording) {
+        if (mIsRecording.compareAndSet(true, false)) {
             stopMediaRecorder();
             if (mCamera != null) {
                 mCamera.lock();
             }
+            if(mustUpdateSurface){
+                updateSurface();
+            }
         }
+    }
+
+    @Override
+    int getCameraOrientation() {
+        return mCameraInfo.orientation;
     }
 
     @Override
@@ -554,15 +648,15 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             return;
         }
         mDeviceOrientation = deviceOrientation;
-        if (isCameraOpened() && mOrientation == Constants.ORIENTATION_AUTO) {
+        if (isCameraOpened() && mOrientation == Constants.ORIENTATION_AUTO && !mIsRecording.get() && !isPictureCaptureInProgress.get()) {
             mCameraParameters.setRotation(calcCameraRotation(deviceOrientation));
-            try {
-            mCamera.setParameters(mCameraParameters);
+            try{
+              mCamera.setParameters(mCameraParameters);
             }
             catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
+              Log.e("CAMERA_1::", "setParameters failed", e);
             }
-         }
+        }
     }
 
     @Override
@@ -659,9 +753,7 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         Size size = chooseOptimalSize(sizes);
 
         // Always re-apply camera parameters
-        if (mPictureSize == null) {
-            mPictureSize = mPictureSizes.sizes(mAspectRatio).last();
-        }
+        mPictureSize = mPictureSizes.sizes(mAspectRatio).last();
         if (mShowingPreview) {
             mCamera.stopPreview();
             mIsPreviewActive = false;
@@ -676,15 +768,16 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
         setAutoFocusInternal(mAutoFocus);
         setFlashInternal(mFlash);
+        setExposureInternal(mExposure);
         setAspectRatio(mAspectRatio);
         setZoomInternal(mZoom);
         setWhiteBalanceInternal(mWhiteBalance);
         setScanningInternal(mIsScanning);
-        try {
-            mCamera.setParameters(mCameraParameters);
+        try{
+          mCamera.setParameters(mCameraParameters);
         }
         catch(RuntimeException e ) {
-              Log.e("RCTCamera", "setParameters failed", e);
+          Log.e("CAMERA_1::", "setParameters failed", e);
         }
         if (mShowingPreview) {
             startCameraPreview();
@@ -724,7 +817,143 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             mCamera = null;
             mPictureSize = null;
             mCallback.onCameraClosed();
+
+            // reset these flags
+            isPictureCaptureInProgress.set(false);
+            mIsRecording.set(false);
         }
+    }
+
+    // Most credit: https://github.com/CameraKit/camerakit-android/blob/master/camerakit-core/src/main/api16/com/wonderkiln/camerakit/Camera1.java
+    void setFocusArea(float x, float y) {
+        if (mCamera != null) {
+            Camera.Parameters parameters = mCamera.getParameters();
+            if (parameters == null) return;
+
+            String focusMode = parameters.getFocusMode();
+            Rect rect = calculateFocusArea(x, y);
+
+            List<Camera.Area> meteringAreas = new ArrayList<>();
+            meteringAreas.add(new Camera.Area(rect, FOCUS_METERING_AREA_WEIGHT_DEFAULT));
+
+            if (parameters.getMaxNumFocusAreas() != 0 && focusMode != null &&
+                    (focusMode.equals(Camera.Parameters.FOCUS_MODE_AUTO) ||
+                            focusMode.equals(Camera.Parameters.FOCUS_MODE_MACRO) ||
+                            focusMode.equals(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE) ||
+                            focusMode.equals(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO))
+                    ) {
+                parameters.setFocusMode(Camera.Parameters.FOCUS_MODE_AUTO);
+                parameters.setFocusAreas(meteringAreas);
+                if (parameters.getMaxNumMeteringAreas() > 0) {
+                    parameters.setMeteringAreas(meteringAreas);
+                }
+                if (!parameters.getSupportedFocusModes().contains(Camera.Parameters.FOCUS_MODE_AUTO)) {
+                    return; //cannot autoFocus
+                }
+                try{
+                  mCamera.setParameters(parameters);
+                }
+                catch(RuntimeException e ) {
+                  Log.e("CAMERA_1::", "setParameters failed", e);
+                }
+
+                try{
+                    mCamera.autoFocus(new Camera.AutoFocusCallback() {
+                        @Override
+                        public void onAutoFocus(boolean success, Camera camera) {
+                            //resetFocus(success, camera);
+                        }
+                    });
+                }
+                catch(RuntimeException e ) {
+                  Log.e("CAMERA_1::", "autoFocus failed", e);
+                }
+            } else if (parameters.getMaxNumMeteringAreas() > 0) {
+                if (!parameters.getSupportedFocusModes().contains(Camera.Parameters.FOCUS_MODE_AUTO)) {
+                    return; //cannot autoFocus
+                }
+                parameters.setFocusMode(Camera.Parameters.FOCUS_MODE_AUTO);
+                parameters.setFocusAreas(meteringAreas);
+                parameters.setMeteringAreas(meteringAreas);
+
+                try{
+                  mCamera.setParameters(parameters);
+                }
+                catch(RuntimeException e ) {
+                  Log.e("CAMERA_1::", "setParameters failed", e);
+                }
+
+                try{
+                    mCamera.autoFocus(new Camera.AutoFocusCallback() {
+                        @Override
+                        public void onAutoFocus(boolean success, Camera camera) {
+                            //resetFocus(success, camera);
+                        }
+                    });
+                }
+                catch(RuntimeException e ) {
+                  Log.e("CAMERA_1::", "autoFocus failed", e);
+                }
+            } else {
+                try{
+                    mCamera.autoFocus(new Camera.AutoFocusCallback() {
+                        @Override
+                        public void onAutoFocus(boolean success, Camera camera) {
+                            //mCamera.cancelAutoFocus();
+                        }
+                    });
+                }
+                catch(RuntimeException e ) {
+                  Log.e("CAMERA_1::", "autoFocus failed", e);
+                }
+            }
+        }
+    }
+
+    private void resetFocus(final boolean success, final Camera camera) {
+        mHandler.removeCallbacksAndMessages(null);
+        mHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (mCamera != null) {
+                    mCamera.cancelAutoFocus();
+                    Camera.Parameters parameters = mCamera.getParameters();
+                    if (parameters == null) return;
+
+                    if (parameters.getFocusMode() != Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE) {
+                        parameters.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
+                        parameters.setFocusAreas(null);
+                        parameters.setMeteringAreas(null);
+                        try{
+                          mCamera.setParameters(parameters);
+                        }
+                        catch(RuntimeException e ) {
+                          Log.e("CAMERA_1::", "setParameters failed", e);
+                        }
+                    }
+
+                    mCamera.cancelAutoFocus();
+                }
+            }
+        }, DELAY_MILLIS_BEFORE_RESETTING_FOCUS);
+    }
+
+    private Rect calculateFocusArea(float x, float y) {
+        int padding = FOCUS_AREA_SIZE_DEFAULT / 2;
+        int centerX = (int) (x * 2000);
+        int centerY = (int) (y * 2000);
+
+        int left = centerX - padding;
+        int top = centerY - padding;
+        int right = centerX + padding;
+        int bottom = centerY + padding;
+
+        if (left < 0) left = 0;
+        if (right > 2000) right = 2000;
+        if (top < 0) top = 0;
+        if (bottom > 2000) bottom = 2000;
+
+        return new Rect(left - 1000, top - 1000, right - 1000, bottom - 1000);
     }
 
     /**
@@ -806,13 +1035,16 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         if (isCameraOpened()) {
             List<String> modes = mCameraParameters.getSupportedFlashModes();
             String mode = FLASH_MODES.get(flash);
-            if (modes != null && modes.contains(mode)) {
+            if(modes == null) {
+                return false;
+            }
+            if (modes.contains(mode)) {
                 mCameraParameters.setFlashMode(mode);
                 mFlash = flash;
                 return true;
             }
             String currentMode = FLASH_MODES.get(mFlash);
-            if (modes == null || !modes.contains(currentMode)) {
+            if (!modes.contains(currentMode)) {
                 mCameraParameters.setFlashMode(Camera.Parameters.FLASH_MODE_OFF);
                 return true;
             }
@@ -822,6 +1054,26 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
             return false;
         }
     }
+
+    private boolean setExposureInternal(float exposure) {
+        mExposure = exposure;
+        if (isCameraOpened()){
+            int minExposure = mCameraParameters.getMinExposureCompensation();
+            int maxExposure = mCameraParameters.getMaxExposureCompensation();
+
+            if (minExposure != maxExposure) {
+                int scaledValue = 0;
+                if (mExposure >= 0 && mExposure <= 1) {
+                    scaledValue = (int) (mExposure * (maxExposure - minExposure)) + minExposure;
+                }
+
+                mCameraParameters.setExposureCompensation(scaledValue);
+                return true;
+            }
+        }
+        return false;
+    }
+
 
     /**
      * @return {@code true} if {@link #mCameraParameters} was modified.
@@ -880,6 +1132,7 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
     }
 
     private void setUpMediaRecorder(String path, int maxDuration, int maxFileSize, boolean recordAudio, CamcorderProfile profile) {
+
         mMediaRecorder = new MediaRecorder();
         mCamera.unlock();
 
@@ -893,11 +1146,14 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
         mMediaRecorder.setOutputFile(path);
         mVideoPath = path;
 
+        CamcorderProfile camProfile;
         if (CamcorderProfile.hasProfile(mCameraId, profile.quality)) {
-            setCamcorderProfile(CamcorderProfile.get(mCameraId, profile.quality), recordAudio);
+            camProfile = CamcorderProfile.get(mCameraId, profile.quality);
         } else {
-            setCamcorderProfile(CamcorderProfile.get(mCameraId, CamcorderProfile.QUALITY_HIGH), recordAudio);
+            camProfile = CamcorderProfile.get(mCameraId, CamcorderProfile.QUALITY_HIGH);
         }
+        camProfile.videoBitRate = profile.videoBitRate;
+        setCamcorderProfile(camProfile, recordAudio);
 
         mMediaRecorder.setOrientationHint(calcCameraRotation(mOrientation != Constants.ORIENTATION_AUTO ? orientationEnumToRotation(mOrientation) : mDeviceOrientation));
 
@@ -910,15 +1166,16 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
         mMediaRecorder.setOnInfoListener(this);
         mMediaRecorder.setOnErrorListener(this);
+
     }
 
     private void stopMediaRecorder() {
-        mIsRecording = false;
+
         if (mMediaRecorder != null) {
             try {
                 mMediaRecorder.stop();
             } catch (RuntimeException ex) {
-                ex.printStackTrace();
+                Log.e("CAMERA_1::", "stopMediaRecorder failed", ex);
             }
             mMediaRecorder.reset();
             mMediaRecorder.release();
@@ -933,6 +1190,7 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
         mCallback.onVideoRecorded(mVideoPath, mOrientation != Constants.ORIENTATION_AUTO ? mOrientation : deviceOrientation, deviceOrientation);
         mVideoPath = null;
+
     }
 
     private void setCamcorderProfile(CamcorderProfile profile, boolean recordAudio) {

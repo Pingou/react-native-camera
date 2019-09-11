@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.license        = package['license']
   s.author         = package['author']
   s.homepage       = package['homepage']
-  s.source         = { :git => 'https://github.com/react-native-community/react-native-camera', :tag => s.version }
+  s.source         = { :git => 'https://github.com/react-native-community/react-native-camera', :tag => "v#{s.version}" }
 
   s.requires_arc   = true
   s.platform       = :ios, '9.0'
@@ -23,24 +23,25 @@ Pod::Spec.new do |s|
     ss.source_files = "ios/RN/**/*.{h,m}"
   end
 
-  s.subspec "FaceDetector" do |ss|
-    ss.dependency 'react-native-camera/RN'
-    ss.dependency 'react-native-camera/RCT'
-
-    ss.dependency 'GoogleMobileVision/Detector', '~> 1.4'
-    ss.dependency 'GoogleMobileVision/MVDataOutput', '~> 1.4'
-    ss.dependency 'GoogleMobileVision/FaceDetector', '~> 1.4'
-
-    ss.source_files = "ios/FaceDetector/**/*.{h,m}"
-    s.static_framework = true
-  end
-
   s.subspec "TextDetector" do |ss|
     ss.dependency 'react-native-camera/RN'
     ss.dependency 'react-native-camera/RCT'
-    ss.dependency 'GoogleMobileVision/TextDetector', '~> 1.4'
+    ss.dependency 'Firebase/MLVision'
+    ss.dependency 'Firebase/MLVisionTextModel'
+  end
 
-    ss.source_files = "ios/TextDetector/**/*.{h,m}"
+  s.subspec "FaceDetectorMLKit" do |ss|
+    ss.dependency 'react-native-camera/RN'
+    ss.dependency 'react-native-camera/RCT'
+    ss.dependency 'Firebase/MLVision'
+    ss.dependency 'Firebase/MLVisionFaceModel'
+  end
+  
+  s.subspec "BarcodeDetectorMLKit" do |ss|
+    ss.dependency 'react-native-camera/RN'
+    ss.dependency 'react-native-camera/RCT'
+    ss.dependency 'Firebase/MLVision'
+    ss.dependency 'Firebase/MLVisionBarcodeModel'
   end
 
   s.default_subspecs = "RN", "RCT"
