@@ -25,6 +25,7 @@ public class CameraViewManager extends ViewGroupManager<RNCameraView> {
     EVENT_ON_BARCODE_DETECTION_ERROR("onGoogleVisionBarcodeDetectionError"),
     EVENT_ON_TEXT_RECOGNIZED("onTextRecognized"),
     EVENT_ON_MODEL_PROCESSED("onModelProcessed"),
+    EVENT_ON_TF_PROCESSED("onTFProcessed"),
     EVENT_ON_PICTURE_TAKEN("onPictureTaken"),
     EVENT_ON_PICTURE_SAVED("onPictureSaved");
 
@@ -200,6 +201,6 @@ public class CameraViewManager extends ViewGroupManager<RNCameraView> {
     int inputDimY = model.getInt("inputDimY");
     int outputDim = model.getInt("outputDim");
     int freqms = model.hasKey("freqms") ? model.getInt("freqms") : 0;
-    view.setModelFile(modelFile, inputDimX, inputDimY, outputDim, freqms);
+    //view.setModelFile(modelFile, inputDimX, inputDimY, outputDim, freqms);
   }
 }

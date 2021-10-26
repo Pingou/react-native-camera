@@ -255,6 +255,20 @@ public class RNCameraViewHelper {
     reactContext.getNativeModule(UIManagerModule.class).getEventDispatcher().dispatchEvent(event);
   }
 
+  public static void emitTFProcessedEvent(
+      ViewGroup view,
+      WritableArray list) {
+   
+
+   TFProcessedEvent event = TFProcessedEvent.obtain(
+        view.getId(),
+        list
+    );
+
+    ReactContext reactContext = (ReactContext) view.getContext();
+    reactContext.getNativeModule(UIManagerModule.class).getEventDispatcher().dispatchEvent(event);
+  }
+
   // Utilities
 
   public static int getCorrectCameraRotation(int rotation, int facing, int cameraOrientation) {
@@ -287,11 +301,11 @@ public class RNCameraViewHelper {
       case CameraModule.VIDEO_4x3:
         return CamcorderProfile.QUALITY_480P;
     }
-    return CamcorderProfile.QUALITY_HIGH;
+    return CamcorderProfile.QUALITY_480P;
   }
 
   public static CamcorderProfile getCamcorderProfile(int quality) {
-    CamcorderProfile profile = CamcorderProfile.get(CamcorderProfile.QUALITY_HIGH);
+    CamcorderProfile profile = CamcorderProfile.get(CamcorderProfile.QUALITY_LOW);
     int camcorderQuality = getCamcorderProfileQualityFromCameraModuleConstant(quality);
     if (CamcorderProfile.hasProfile(camcorderQuality)) {
       profile = CamcorderProfile.get(camcorderQuality);

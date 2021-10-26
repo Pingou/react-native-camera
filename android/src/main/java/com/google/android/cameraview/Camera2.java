@@ -188,9 +188,9 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
                         // @TODO: implement deviceOrientation
                         mCallback.onPictureTaken(data, 0);
                     } else {
-                        mCallback.onFramePreview(data, image.getWidth(), image.getHeight(), mDisplayOrientation);
+                        mCallback.onFramePreview(image, data, image.getWidth(), image.getHeight(), mDisplayOrientation);
                     }
-                    image.close();
+                    //image.close();
                 }
             }
         }
@@ -867,9 +867,10 @@ class Camera2 extends CameraViewImpl implements MediaRecorder.OnInfoListener, Me
      * @return The picked size for camera preview.
      */
     private Size chooseOptimalSize() {
+
         int surfaceLonger, surfaceShorter;
-        final int surfaceWidth = mPreview.getWidth();
-        final int surfaceHeight = mPreview.getHeight();
+        final int surfaceWidth = 400;//mPreview.getWidth();
+        final int surfaceHeight = 400;//mPreview.getHeight();
         if (surfaceWidth < surfaceHeight) {
             surfaceLonger = surfaceHeight;
             surfaceShorter = surfaceWidth;

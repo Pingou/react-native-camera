@@ -24,6 +24,7 @@ import com.facebook.react.bridge.ReadableMap;
 import android.util.Log;
 import java.util.Set;
 import java.util.SortedSet;
+import android.media.Image;
 
 abstract class CameraViewImpl {
 
@@ -129,7 +130,7 @@ abstract class CameraViewImpl {
 
         void onVideoRecorded(String path, int videoOrientation, int deviceOrientation);
 
-        void onFramePreview(byte[] data, int width, int height, int orientation);
+        void onFramePreview(Image image, byte[] data, int width, int height, int orientation);
 
         void onMountError();
     }

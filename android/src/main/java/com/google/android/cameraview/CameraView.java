@@ -44,6 +44,8 @@ import java.util.ArrayList;
 import java.util.Set;
 import java.util.SortedSet;
 
+import android.media.Image;
+
 public class CameraView extends FrameLayout {
 
     /** The camera device faces the opposite direction as the device's screen. */
@@ -623,9 +625,9 @@ public class CameraView extends FrameLayout {
         }
 
         @Override
-        public void onFramePreview(byte[] data, int width, int height, int orientation) {
+        public void onFramePreview(Image image, byte[] data, int width, int height, int orientation) {
             for (Callback callback : mCallbacks) {
-                callback.onFramePreview(CameraView.this, data, width, height, orientation);
+                callback.onFramePreview(CameraView.this, image, data, width, height, orientation);
             }
         }
 
@@ -756,7 +758,7 @@ public class CameraView extends FrameLayout {
         public void onVideoRecorded(CameraView cameraView, String path, int videoOrientation, int deviceOrientation) {
         }
 
-        public void onFramePreview(CameraView cameraView, byte[] data, int width, int height, int orientation) {
+        public void onFramePreview(CameraView cameraView, Image image, byte[] data, int width, int height, int orientation) {
         }
 
         public void onMountError(CameraView cameraView) {}

@@ -786,13 +786,17 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
 
     @SuppressWarnings("SuspiciousNameCombination")
     private Size chooseOptimalSize(SortedSet<Size> sizes) {
+
+
+      
+
         if (!mPreview.isReady()) { // Not yet laid out
             return sizes.first(); // Return the smallest size
         }
         int desiredWidth;
         int desiredHeight;
-        final int surfaceWidth = mPreview.getWidth();
-        final int surfaceHeight = mPreview.getHeight();
+        final int surfaceWidth = 600;//mPreview.getWidth();
+        final int surfaceHeight = 600;//mPreview.getHeight();
         if (isLandscape(mDisplayOrientation)) {
             desiredWidth = surfaceHeight;
             desiredHeight = surfaceWidth;
@@ -1128,7 +1132,7 @@ class Camera1 extends CameraViewImpl implements MediaRecorder.OnInfoListener,
     @Override
     public void onPreviewFrame(byte[] data, Camera camera) {
         Camera.Size previewSize = mCameraParameters.getPreviewSize();
-        mCallback.onFramePreview(data, previewSize.width, previewSize.height, mDeviceOrientation);
+        mCallback.onFramePreview(null, data, previewSize.width, previewSize.height, mDeviceOrientation);
     }
 
     private void setUpMediaRecorder(String path, int maxDuration, int maxFileSize, boolean recordAudio, CamcorderProfile profile) {

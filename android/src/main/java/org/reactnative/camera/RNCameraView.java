@@ -1,5 +1,6 @@
 package org.reactnative.camera;
 
+import android.util.Log;
 import android.view.TextureView;
 import android.Manifest;
 import android.annotation.SuppressLint;
@@ -21,6 +22,9 @@ import com.google.zxing.MultiFormatReader;
 import com.google.zxing.Result;
 import org.reactnative.barcodedetector.RNBarcodeDetector;
 import org.reactnative.camera.tasks.*;
+import org.reactnative.camera.tflite.Classifier;
+
+import org.reactnative.camera.tflite.ImageUtils;
 import org.reactnative.camera.utils.ImageDimensions;
 import org.reactnative.camera.utils.RNFileUtils;
 import org.reactnative.facedetector.RNFaceDetector;
@@ -37,6 +41,13 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+
+
+import org.reactnative.camera.tflite.Classifier.Model;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.media.Image;
+import android.media.Image.Plane;
 
 public class RNCameraView extends CameraView implements LifecycleEventListener, BarCodeScannerAsyncTaskDelegate, FaceDetectorAsyncTaskDelegate,
     BarcodeDetectorAsyncTaskDelegate, TextRecognizerAsyncTaskDelegate, PictureSavedDelegate, ModelProcessorAsyncTaskDelegate {
@@ -88,11 +99,52 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
   private int mPaddingX;
   private int mPaddingY;
 
+
+
+
+  private Classifier classifier = null;
+  private Model model = Model.FLOAT_EFFICIENTNET;
+  private Bitmap rgbFrameBitmap = null;
+  /** Input image size of the model along x axis. */
+  private int imageSizeX;
+  /** Input image size of the model along y axis. */
+  private int imageSizeY;
+  protected int previewWidth = 0;
+  protected int previewHeight = 0;
+  protected boolean isProcessingFrame = false;
+  private byte[][] yuvBytes = new byte[3][];
+  private int[] rgbBytes = null;
+  private int yRowStride;
+  private Image previewImage = null;
+  private Runnable imageConverter;
+  private Runnable postInferenceCallback;
+
+
+
+  private Handler handler;
+  private HandlerThread handlerThread;
+
   public RNCameraView(ThemedReactContext themedReactContext) {
     super(themedReactContext, true);
     mThemedReactContext = themedReactContext;
     themedReactContext.addLifecycleEventListener(this);
 
+   // handlerThread = new HandlerThread("inference");
+   // handlerThread.start();
+   // handler = new Handler(handlerThread.getLooper());
+
+    try {
+      classifier = Classifier.create(themedReactContext.getCurrentActivity(), model, 1);
+    } catch (IOException e) {
+        Log.v("pingou error",  "Failed to create classifier.");
+    }
+    Log.v("pingou",  "Classifier created.");
+    // Updates the input image size.
+    imageSizeX = classifier.getImageSizeX();
+    imageSizeY = classifier.getImageSizeY();
+
+
+    setScanning(true);
     addCallback(new Callback() {
       @Override
       public void onCameraOpened(CameraView cameraView) {
@@ -142,20 +194,29 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
       }
 
       @Override
-      public void onFramePreview(CameraView cameraView, byte[] data, int width, int height, int rotation) {
+      public void onFramePreview(CameraView cameraView, Image image, final byte[] data, int width, int height, int rotation) {
         int correctRotation = RNCameraViewHelper.getCorrectCameraRotation(rotation, getFacing(), getCameraOrientation());
         boolean willCallBarCodeTask = mShouldScanBarCodes && !barCodeScannerTaskLock && cameraView instanceof BarCodeScannerAsyncTaskDelegate;
         boolean willCallFaceTask = mShouldDetectFaces && !faceDetectorTaskLock && cameraView instanceof FaceDetectorAsyncTaskDelegate;
         boolean willCallGoogleBarcodeTask = mShouldGoogleDetectBarcodes && !googleBarcodeDetectorTaskLock && cameraView instanceof BarcodeDetectorAsyncTaskDelegate;
         boolean willCallTextTask = mShouldRecognizeText && !textRecognizerTaskLock && cameraView instanceof TextRecognizerAsyncTaskDelegate;
-	boolean willCallModelTask = mShouldProcessModel && !modelProcessorTaskLock && cameraView instanceof ModelProcessorAsyncTaskDelegate;        
-	if (!willCallBarCodeTask && !willCallFaceTask && !willCallGoogleBarcodeTask && !willCallTextTask && !willCallModelTask) {
+	    boolean willCallModelTask = mShouldProcessModel && !modelProcessorTaskLock && cameraView instanceof ModelProcessorAsyncTaskDelegate;
+
+
+	  /*  if (!willCallBarCodeTask && !willCallFaceTask && !willCallGoogleBarcodeTask && !willCallTextTask && !willCallModelTask) {
           return;
         }
 
         if (data.length < (1.5 * width * height)) {
             return;
+        }*/
+        if (data.length < (1.5 * width * height)) {
+
+          if (image != null)
+            image.close();
+          return;
         }
+
 
         if (willCallBarCodeTask) {
           barCodeScannerTaskLock = true;
@@ -193,16 +254,216 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
           new TextRecognizerAsyncTask(delegate, mThemedReactContext, data, width, height, correctRotation, getResources().getDisplayMetrics().density, getFacing(), getWidth(), getHeight(), mPaddingX, mPaddingY).execute();
         }
 
-	if (willCallModelTask) {
+	    /*if (willCallModelTask) {
           modelProcessorTaskLock = true;
           getImageData((TextureView) cameraView.getView());
           ModelProcessorAsyncTaskDelegate delegate = (ModelProcessorAsyncTaskDelegate) cameraView;
           new ModelProcessorAsyncTask(delegate, mModelProcessor, mModelInput, mModelOutput, mModelMaxFreqms, width, height, correctRotation).execute();
-        }
+        }*/
+
+        preprocessImage(image, data, width, height, rotation);
+
+
       }
     });
   }
 
+
+  private void preprocessImage(Image image, final byte[] data, int width, int height, int rotation) {
+
+    if (isProcessingFrame) {
+        Log.d("log", "Dropping frame!");
+        if (image != null)
+          image.close();
+        return;
+    }
+
+    isProcessingFrame = true;
+    //camera api 1
+    if (image == null) {
+      try {
+        // Initialize the storage bitmaps once when the resolution is known.
+        if (rgbBytes == null) {
+          previewHeight = height;
+          previewWidth = width;
+          rgbBytes = new int[previewWidth * previewHeight];
+          rgbFrameBitmap = Bitmap.createBitmap(previewWidth, previewHeight, Bitmap.Config.ARGB_8888);
+        }
+      } catch (final Exception e) {
+        Log.d("error", "Initialize the storage bitmaps ");
+
+        isProcessingFrame = false;
+        return;
+      }
+
+
+      yuvBytes[0] = data;
+      yRowStride = previewWidth;
+
+      imageConverter =
+              new Runnable() {
+                @Override
+                public void run() {
+
+                  try {
+                    ImageUtils.convertYUV420SPToARGB8888(data, previewWidth, previewHeight, rgbBytes);
+                  }
+                  catch (Exception e) {
+                    Log.d("error", "convertYUV420SPToARGB8888 ");
+                  }
+                }
+              };
+
+
+    }
+    //camera2
+    else {
+      if (rgbBytes == null) {
+        previewHeight = height;
+        previewWidth = width;
+        rgbBytes = new int[previewWidth * previewHeight];
+      }
+      try {
+
+        previewImage = image;
+        final Plane[] planes = image.getPlanes();
+        fillBytes(planes, yuvBytes);
+        yRowStride = planes[0].getRowStride();
+        final int uvRowStride = planes[1].getRowStride();
+        final int uvPixelStride = planes[1].getPixelStride();
+
+        imageConverter =
+                new Runnable() {
+                  @Override
+                  public void run() {
+                    ImageUtils.convertYUV420ToARGB8888(
+                            yuvBytes[0],
+                            yuvBytes[1],
+                            yuvBytes[2],
+                            previewWidth,
+                            previewHeight,
+                            yRowStride,
+                            uvRowStride,
+                            uvPixelStride,
+                            rgbBytes);
+                  }
+                };
+      } catch (final Exception e) {
+        Log.d("pingou error", "Exception camera2!");
+        isProcessingFrame = false;
+        image.close();
+        previewImage = null;
+        return;
+      }
+    }
+
+
+
+      processImage(rotation);
+  }
+
+
+  protected void fillBytes(final Plane[] planes, final byte[][] yuvBytes) {
+    // Because of the variable row stride it's not possible to know in
+    // advance the actual necessary dimensions of the yuv planes.
+    for (int i = 0; i < planes.length; ++i) {
+      final ByteBuffer buffer = planes[i].getBuffer();
+      if (yuvBytes[i] == null) {
+//        Log.d("Initializing buffer %d at size %d", i, buffer.capacity());
+        yuvBytes[i] = new byte[buffer.capacity()];
+      }
+      buffer.get(yuvBytes[i]);
+    }
+  }
+  protected void readyForNextImage() {
+    if (postInferenceCallback != null) {
+      postInferenceCallback.run();
+    }
+  }
+
+
+  protected int[] getRgbBytes() {
+    imageConverter.run();
+    return rgbBytes;
+  }
+
+  protected int getLuminanceStride() {
+    return yRowStride;
+  }
+
+  protected byte[] getLuminance() {
+    return yuvBytes[0];
+  }
+
+  protected void processImage(final int orientation) {
+    rgbFrameBitmap.setPixels(getRgbBytes(), 0, previewWidth, 0, 0, previewWidth, previewHeight);
+    final int cropSize = Math.min(previewWidth, previewHeight);
+
+    AsyncTask.execute(new Runnable() {
+      @Override
+      public void run() {
+        if (classifier != null) {
+
+          try {
+            final List<Classifier.Recognition> results =
+                    classifier.recognizeImage(rgbFrameBitmap, orientation);
+
+            if (previewImage != null) {
+              previewImage.close();
+              previewImage = null;
+            }
+            final WritableArray resultList = Arguments.createArray();
+            for (Classifier.Recognition result : results) {
+              WritableMap serializedItem = Arguments.createMap();
+
+              //serializedItem.putString("label", result.getTitle());
+              serializedItem.putDouble("score", result.getConfidence());
+              serializedItem.putInt("pos", result.getPosition());
+              resultList.pushMap(serializedItem);
+            }
+
+
+            mThemedReactContext.getCurrentActivity().runOnUiThread(new Runnable() {
+              @Override
+              public void run() {
+                Log.v("pingou", "got results." + String.valueOf(results.size()));
+                RNCameraViewHelper.emitTFProcessedEvent(RNCameraView.this, resultList);
+
+              }
+            });
+          }
+          catch (Exception e) {
+
+          }
+        }
+        isProcessingFrame = false;
+      }
+    });
+
+    /*
+    runInBackground(
+            new Runnable() {
+              @Override
+              public void run() {
+                if (classifier != null) {
+                  final List<Classifier.Recognition> results =
+                          classifier.recognizeImage(rgbFrameBitmap, orientation);
+                }
+                isProcessingFrame = false;
+                // readyForNextImage();
+              }
+
+
+            });*/
+  }
+
+    protected synchronized void runInBackground(final Runnable r) {
+      if (handler != null) {
+        handler.post(r);
+      }
+    }
+
+  /*
   private void getImageData(TextureView view) {
     Bitmap bitmap = view.getBitmap(mModelImageDimX, mModelImageDimY);
     if (bitmap == null) {
@@ -220,7 +481,7 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
       }
     }
   }
-
+*/
   @Override
   protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
     View preview = getView();
@@ -471,6 +732,7 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
     return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
   }
 
+  /*
   private void setupModelProcessor() {
     try {
       mModelProcessor = new Interpreter(loadModelFile());
@@ -479,7 +741,7 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
       mModelOutput = ByteBuffer.allocateDirect(mModelOutputDim);
     } catch(Exception e) {}
   }
-
+*/
   public void setGoogleVisionBarcodeType(int barcodeType) {
     mGoogleVisionBarCodeType = barcodeType;
     if (mGoogleBarcodeDetector != null) {
@@ -521,6 +783,7 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
     setScanning(mShouldDetectFaces || mShouldGoogleDetectBarcodes || mShouldScanBarCodes || mShouldRecognizeText);
   }
 
+  /*
   public void setModelFile(String modelFile, int inputDimX, int inputDimY, int outputDim, int freqms) {
     this.mModelFile = modelFile;
     this.mModelImageDimX = inputDimX;
@@ -534,6 +797,7 @@ public class RNCameraView extends CameraView implements LifecycleEventListener, 
     this.mShouldProcessModel = shouldProcessModel;
     setScanning(mShouldDetectFaces || mShouldGoogleDetectBarcodes || mShouldScanBarCodes || mShouldRecognizeText || mShouldProcessModel);
   }
+  */
 
   public void onTextRecognized(WritableArray serializedData) {
     if (!mShouldRecognizeText) {
